@@ -92,7 +92,6 @@ generate_secret() {
     # 修改为固定 Secret:
     echo "3e5b010925a504e0748c3bc05b7fbd74"
 }
-
 # --- IP 模式选择 ---
 select_ip_mode() {
     echo -e "请选择监听模式:" >&2
@@ -149,8 +148,8 @@ install_mtp_python() {
     fi
     chmod +x "$BIN_DIR/mtp-python"
 
-    read -p "请输入伪装域名 (默认 www.apple.com): " DOMAIN
-    [ -z "$DOMAIN" ] && DOMAIN="www.apple.com"
+    read -p "请输入伪装域名 (默认 azure.microsoft.com): " DOMAIN
+    [ -z "$DOMAIN" ] && DOMAIN="azure.microsoft.com"
     
     read -p "请输入推广 TAG (留空则不设置): " ADTAG
     
@@ -299,8 +298,8 @@ install_mtg() {
     fi
     chmod +x "$BIN_DIR/mtg-go"
 
-    read -p "请输入伪装域名 (默认 www.apple.com): " DOMAIN
-    [ -z "$DOMAIN" ] && DOMAIN="www.apple.com"
+    read -p "请输入伪装域名 (默认 azure.microsoft.com): " DOMAIN
+    [ -z "$DOMAIN" ] && DOMAIN="azure.microsoft.com"
     
     IP_MODE=$(select_ip_mode)
     
