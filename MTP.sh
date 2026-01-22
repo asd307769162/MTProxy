@@ -1,369 +1,318 @@
-#!/bin/bash
+#!/usr/bin/env sh
 
-# 检查是否使用 bash 运行
-if [ -z "$BASH_VERSION" ]; then
-    echo "错误: 请使用 bash 运行此脚本 (例如: bash MTP.sh)"
-    exit 1
-fi
+# 脚本设置为在遇到错误时立即退出
+set -e
 
-# 彩色输出
-red(){
-    echo -e "\033[31m\033[01m$1\033[0m"
-}
-green(){
-    echo -e "\033[32m\033[01m$1\033[0m"
-}
-yellow(){
-    echo -e "\033[33m\033[01m$1\033[0m"
-}
+# --- 全局配置 ---
+BIN_PATH="/usr/local/bin/mtg"
+CONFIG_DIR="/etc/mtg"
+RELEASE_BASE_URL="https://github.com/9seconds/mtg/releases/download/v2.1.7"
 
-# 全局变量定义
-WORKDIR="/home/mtproxy"
-CONFIG_FILE="${WORKDIR}/mtg.conf"
-MTG_BINARY="mtg"
-SERVICE_NAME="mtproxy"
-SCRIPT_PATH=$(readlink -f "$0")
-INIT_SYSTEM="" # 用于存储系统初始化类型
+# --- 功能函数 ---
 
-# --- 系统检测与适配模块 ---
+# 1. 系统与环境检测
+# =================================
 
-# 检测系统初始化类型 (systemd 或 openrc)
-detect_init_system() {
-    if command -v systemctl &> /dev/null && [ -d /run/systemd/system ]; then
+check_init_system() {
+    # 使用兼容 BusyBox ps 的语法来获取 PID 1 的进程名
+    pid1_comm=$(ps -o comm= 1 | tail -n 1 | tr -d ' ')
+
+    if [ "$pid1_comm" = "systemd" ]; then
         INIT_SYSTEM="systemd"
-    elif command -v rc-service &> /dev/null && command -v rc-update &> /dev/null; then
+    elif [ "$pid1_comm" = "init" ] && command -v rc-service >/dev/null 2>&1; then
         INIT_SYSTEM="openrc"
     else
-        red "错误: 无法识别的系统初始化类型 (既不是 systemd 也不是 OpenRC)。"
-        exit 1
+        INIT_SYSTEM="direct"
     fi
-    yellow "检测到系统初始化类型: $INIT_SYSTEM"
+    # 确保相关目录存在
+    mkdir -p "$CONFIG_DIR"
+    mkdir -p "/var/run"
 }
 
-# --- 统一的功能接口 ---
+check_deps() {
+    required_cmds="curl grep cut uname tar mktemp awk find head ps"
+    # 在非 systemd 系统上，start-stop-daemon 是必须的
+    if [ "$INIT_SYSTEM" != "systemd" ]; then
+        required_cmds="$required_cmds start-stop-daemon"
+    fi
+
+    deps_ok=true
+    for cmd in $required_cmds; do
+        if ! command -v "$cmd" >/dev/null 2>&1; then
+            deps_ok=false; echo "错误: 缺少核心命令: $cmd";
+        fi
+    done
+    if $deps_ok; then return; fi
+
+    echo
+    read -p "脚本依赖缺失，是否尝试自动安装？ (y/N): " answer
+    if [ "$answer" != "y" ] && [ "$answer" != "Y" ]; then
+        echo "错误: 缺少依赖，脚本无法继续运行！"; exit 1;
+    fi
+
+    if [ -f /etc/os-release ]; then . /etc/os-release; else
+        echo "错误: 无法检测到操作系统类型！"; exit 1;
+    fi
+
+    case "$ID" in
+        ubuntu|debian) apt-get install -y curl grep coreutils tar procps daemon ;;
+        alpine) apk add --no-cache curl grep coreutils tar procps openrc ;;
+        *) echo "警告: 无法自动安装依赖，请手动安装所需工具。" ;;
+    esac
+}
+
+detect_arch() {
+    arch=$(uname -m)
+    case "$arch" in
+        x86_64) echo "amd64" ;;
+        i386|i686) echo "386" ;;
+        aarch64) echo "arm64" ;;
+        armv7l) echo "armv7" ;;
+        armv6l) echo "armv6" ;;
+        *) echo "unsupported" ;;
+    esac
+}
+
+# 2. 核心安装与配置
+# =================================
+
+get_mtg_config() {
+    service_type="$1"
+    other_type=""
+    if [ "$service_type" = "secured" ]; then other_type="faketls"; else other_type="secured"; fi
+    other_config_file="${CONFIG_DIR}/config_${other_type}"
+    other_port=""
+
+    if [ -f "$other_config_file" ]; then
+        other_port=$(grep 'PORT=' "$other_config_file" | cut -d'=' -f2)
+    fi
+
+    echo
+    echo "--- 配置 [${service_type}] 代理 ---"
+    
+    if [ "$service_type" = "faketls" ]; then
+        read -p "请输入用于伪装的域名 (默认 www.microsoft.com): " FAKE_TLS_DOMAIN
+        if [ -z "$FAKE_TLS_DOMAIN" ]; then FAKE_TLS_DOMAIN="www.microsoft.com"; fi
+        SECRET=$("$BIN_PATH" generate-secret --hex "$FAKE_TLS_DOMAIN")
+    else
+        SECRET=$("$BIN_PATH" generate-secret "secured")
+    fi
+
+    while true; do
+        read -p "请输入监听端口 (留空随机): " PORT
+        if [ -z "$PORT" ]; then PORT=$((10000 + RANDOM % 45535)); fi
+        
+        if [ -n "$other_port" ] && [ "$PORT" = "$other_port" ]; then
+            echo "错误: 端口 $PORT 已被 [${other_type}] 实例占用，请重新输入。"
+        else
+            break
+        fi
+    done
+}
+
+save_config() {
+    service_type="$1"
+    config_file="${CONFIG_DIR}/config_${service_type}"
+    echo "PORT=${PORT}" > "$config_file"
+    echo "SECRET=${SECRET}" >> "$config_file"
+}
+
+install_mtg() {
+    service_type="$1"
+    
+    # 只有在主程序不存在时才执行下载
+    if ! [ -f "$BIN_PATH" ]; then
+        ARCH=$(detect_arch)
+        if [ "$ARCH" = "unsupported" ]; then echo "错误: 不支持的系统架构：$(uname -m)"; exit 1; fi
+        echo "检测到系统架构：$ARCH"
+
+        TAR_NAME="mtg-2.1.7-linux-${ARCH}.tar.gz"; DOWNLOAD_URL="${RELEASE_BASE_URL}/${TAR_NAME}"
+        TMP_DIR=$(mktemp -d); trap 'rm -rf -- "$TMP_DIR"' EXIT
+        echo "正在下载主程序 ${DOWNLOAD_URL} …"; curl -L "${DOWNLOAD_URL}" -o "${TMP_DIR}/${TAR_NAME}"
+        echo "正在解压文件..."; tar -xzf "${TMP_DIR}/${TAR_NAME}" -C "${TMP_DIR}"
+        
+        MTG_FOUND_PATH=$(find "${TMP_DIR}" -type f -name mtg | head -n 1)
+        if [ -z "$MTG_FOUND_PATH" ]; then echo "错误：未找到 mtg 可执行文件！"; exit 1; fi
+
+        mv "${MTG_FOUND_PATH}" "${BIN_PATH}"; chmod +x "${BIN_PATH}"
+        echo "主程序已安装至 ${BIN_PATH}"
+    fi
+
+    get_mtg_config "$service_type"
+    save_config "$service_type"
+    echo "配置已保存至 ${CONFIG_DIR}/config_${service_type}"
+
+    restart_service "$service_type"
+    echo "[$service_type] 实例安装/更新完成！"
+}
+
+# 3. 服务管理 (所有函数都接受 service_type 作为参数)
+# =================================
 
 start_service() {
-    yellow "正在启动 MTProxy 服务..."
-    if [ "$INIT_SYSTEM" == "systemd" ]; then
-        systemctl start ${SERVICE_NAME}
-    elif [ "$INIT_SYSTEM" == "openrc" ]; then
-        rc-service ${SERVICE_NAME} start
-    fi
-    sleep 2
-    if ! is_service_running; then
-        red "服务启动失败！请检查日志。"
-        if [ "$INIT_SYSTEM" == "systemd" ]; then
-            yellow "使用 'systemctl status ${SERVICE_NAME}' 或 'journalctl -u ${SERVICE_NAME}' 查看。"
-        else
-            yellow "日志文件位于: ${WORKDIR}/mtg.log"
-        fi
-        exit 1
-    fi
+    service_type="$1"
+    config_file="${CONFIG_DIR}/config_${service_type}"
+    pid_file="/var/run/mtg_${service_type}.pid"
+
+    if ! [ -f "$config_file" ]; then echo "错误: [$service_type] 未配置，请先安装。"; return 1; fi
+    if is_running "$service_type"; then echo "[$service_type] 已在运行中。"; return; fi
+
+    echo "正在启动 [$service_type] 服务..."
+    . "$config_file"; args="simple-run 0.0.0.0:${PORT} ${SECRET}"
+    start-stop-daemon --start --quiet --pidfile "$pid_file" --make-pidfile --background \
+        --exec "$BIN_PATH" -- ${args}
+    sleep 1
+    if is_running "$service_type"; then echo "[$service_type] 服务已启动。"; else echo "[$service_type] 服务启动失败。"; fi
 }
 
 stop_service() {
-    yellow "正在停止 MTProxy 服务..."
-    if [ "$INIT_SYSTEM" == "systemd" ]; then
-        systemctl stop ${SERVICE_NAME} > /dev/null 2>&1
-    elif [ "$INIT_SYSTEM" == "openrc" ]; then
-        if [ -f "/etc/init.d/${SERVICE_NAME}" ]; then
-            rc-service ${SERVICE_NAME} stop > /dev/null 2>&1
-        fi
-    fi
-    # 强制后备措施
-    pkill -f "${WORKDIR}/${MTG_BINARY}" > /dev/null 2>&1
-    green "服务已停止。"
+    service_type="$1"
+    pid_file="/var/run/mtg_${service_type}.pid"
+
+    if ! is_running "$service_type"; then echo "[$service_type] 服务未在运行。"; return; fi
+    
+    echo "正在停止 [$service_type] 服务..."
+    start-stop-daemon --stop --quiet --pidfile "$pid_file"
+    rm -f "$pid_file"
+    echo "[$service_type] 服务已停止。"
 }
 
 restart_service() {
-    yellow "正在重启 MTProxy 服务..."
-    if [ "$INIT_SYSTEM" == "systemd" ]; then
-        systemctl restart ${SERVICE_NAME}
-    elif [ "$INIT_SYSTEM" == "openrc" ]; then
-        rc-service ${SERVICE_NAME} restart
-    fi
-    sleep 2
-    if is_service_running; then
-        green "服务已重启。"
+    service_type="$1"
+    if is_running "$service_type"; then stop_service "$service_type"; sleep 1; fi
+    start_service "$service_type"
+}
+
+is_running() {
+    service_type="$1"
+    pid_file="/var/run/mtg_${service_type}.pid"
+    # 检查pid文件是否存在，并且/proc/目录下是否存在对应的pid目录
+    if [ -f "$pid_file" ] && [ -d "/proc/$(cat "$pid_file")" ]; then
+        return 0 # 0 表示 true (成功)
     else
-        red "服务重启失败。"
+        return 1 # 1 表示 false (失败)
     fi
 }
 
-is_service_running() {
-    if [ "$INIT_SYSTEM" == "systemd" ]; then
-        systemctl is-active --quiet ${SERVICE_NAME}
-        return $?
-    elif [ "$INIT_SYSTEM" == "openrc" ]; then
-        rc-service ${SERVICE_NAME} status >/dev/null 2>&1
-        return $?
-    fi
-    return 1 # 默认未运行
-}
+# 4. 辅助功能
+# =================================
 
-# --- 核心安装/卸载逻辑 ---
-
-install_mtproxy() {
-    # 检查是否为 root 用户
-    if [ "$EUID" -ne 0 ]; then
-      red "错误: 请以 root 用户权限运行此脚本！"
-      exit 1
-    fi
+uninstall_mtg() {
+    service_type="$1"
+    config_file="${CONFIG_DIR}/config_${service_type}"
     
-    if [ -d "$WORKDIR" ]; then
-        yellow "检测到已安装 MTProxy，如果继续，将会覆盖安装。"
-        read -p "是否继续? (y/n): " confirm
-        if [[ $confirm != "y" ]]; then
-            green "操作已取消。"
-            exit 0
-        fi
-    fi
+    echo
+    read -p "您确定要卸载 [$service_type] 实例吗？ (y/N): " confirm
+    if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then echo "操作已取消。"; return; fi
 
-    # 1. 自定义配置 (通用)
-    yellow "--- 开始进行交互式配置 ---"
-    while true; do
-        read -p "请输入您想使用的代理端口 ( 默认: 8443 ): " PORT
-        [ -z "$PORT" ] && PORT="8443"
-        if [[ "$PORT" -gt 0 && "$PORT" -le 65535 ]]; then
-            green "端口设置为: $PORT"
-            break
-        else
-            red "端口输入无效，请输入 1-65535 之间的数字。"
-        fi
-    done
-
-    while true; do
-        read -p "请输入您要伪装的域名 (默认: www.microsoft.com): " FAKE_DOMAIN
-        [ -z "$FAKE_DOMAIN" ] && FAKE_DOMAIN="www.microsoft.com"
-        if [ -n "$FAKE_DOMAIN" ]; then
-            green "伪装域名设置为: $FAKE_DOMAIN"
-            break
-        else
-            red "伪装域名不能为空。"
-        fi
-    done
-
-    # 2. 安装依赖 (根据系统类型)
-    yellow "正在安装必要的依赖工具..."
-    if [ "$INIT_SYSTEM" == "systemd" ]; then
-        if command -v yum &> /dev/null; then
-            yum install -y curl wget iproute net-tools tar bind-utils openssl coreutils procps > /dev/null 2>&1
-        elif command -v apt-get &> /dev/null; then
-            apt-get update > /dev/null 2>&1
-            apt-get install -y curl wget iproute2 net-tools tar dnsutils openssl coreutils procps > /dev/null 2>&1
-        else
-            red "错误: 无法识别的包管理器 (yum/apt)，脚本终止。"
-            exit 1
-        fi
-    elif [ "$INIT_SYSTEM" == "openrc" ]; then
-        apk update
-        apk add bash curl wget openssl coreutils procps-ng bind-tools tar
-    fi
-    green "依赖安装完成。"
-
-    # 3. 创建工作目录和下载 (通用)
-    yellow "正在创建工作目录: $WORKDIR"
-    stop_service
-    rm -rf "$WORKDIR"
-    mkdir -p "$WORKDIR"
-    cd "$WORKDIR" || exit
-
-    yellow "正在下载 MTProxy 代理程序 (v1.0.11)..."
-    ARCH=$(uname -m)
-    case $ARCH in
-        "x86_64") ARCH="amd64" ;;
-        "aarch64") ARCH="arm64" ;;
-        *) red "错误: 此脚本优化版暂不支持您的系统架构: $ARCH"; exit 1 ;;
-    esac
-
-    MTG_URL="https://github.com/9seconds/mtg/releases/download/v1.0.11/mtg-1.0.11-linux-${ARCH}.tar.gz"
-    wget -q -O mtg.tar.gz "$MTG_URL"
-    if [ $? -ne 0 ]; then
-        red "下载代理程序失败，请检查网络或访问 Github 的能力。"
-        exit 1
-    fi
-    tar xzf mtg.tar.gz "mtg-1.0.11-linux-${ARCH}/mtg" --strip-components=1
-    rm mtg.tar.gz
-    chmod +x "$MTG_BINARY"
-    green "代理程序下载完成。"
-
-    # 4. 生成配置 (通用)
-    yellow "正在生成配置..."
-    SECRET=$( (date +%s%N; ps -ef; echo $$) | sha256sum | head -c 32 )
-    TLS_SECRET="ee${SECRET}$(echo -n ${FAKE_DOMAIN} | xxd -p -c 256)"
-    echo "PORT=${PORT}" > $CONFIG_FILE
-    echo "TLS_SECRET=${TLS_SECRET}" >> $CONFIG_FILE
-    green "配置文件已保存至: $CONFIG_FILE"
-
-    # 5. 安装并启动守护进程 (根据系统类型)
-    yellow "正在安装并启动守护进程..."
-    if [ "$INIT_SYSTEM" == "systemd" ]; then
-        SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
-        SERVICE_CONTENT="[Unit]
-Description=MTProxy Service
-After=network.target
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=${WORKDIR}
-ExecStart=${WORKDIR}/${MTG_BINARY} run -b 0.0.0.0:${PORT} ${TLS_SECRET}
-Restart=always
-RestartSec=3
-
-[Install]
-WantedBy=multi-user.target"
-        echo -e "${SERVICE_CONTENT}" > $SERVICE_FILE
-        systemctl daemon-reload
-        systemctl enable ${SERVICE_NAME}
+    echo
+    echo "开始卸载 [$service_type] ..."; if is_running "$service_type"; then stop_service "$service_type"; fi
     
-    elif [ "$INIT_SYSTEM" == "openrc" ]; then
-        SERVICE_FILE="/etc/init.d/${SERVICE_NAME}"
-        PID_FILE="/run/${SERVICE_NAME}.pid"
-        SERVICE_CONTENT="#!/sbin/openrc-run
-description=\"MTProxy Service\"
-depend() { need net; }
+    rm -f "$config_file"
+    echo "[$service_type] 已卸载。"
 
-WORKDIR=\"${WORKDIR}\"
-CONFIG_FILE=\"\${WORKDIR}/mtg.conf\"
-MTG_BINARY=\"\${WORKDIR}/mtg\"
-LOG_FILE=\"\${WORKDIR}/mtg.log\"
-PID_FILE=\"${PID_FILE}\"
-
-command=\"\${MTG_BINARY}\"
-command_background=true
-pidfile=\"\${PID_FILE}\"
-
-start_pre() {
-    if [ ! -f \"\${CONFIG_FILE}\" ]; then eerror \"Configuration file not found.\"; return 1; fi
-    source \"\${CONFIG_FILE}\"
-    if [ ! -x \"\${command}\" ]; then eerror \"MTProxy binary not found.\"; return 1; fi
-    command_args=\"run -b 0.0.0.0:\${PORT} \${TLS_SECRET} >> \${LOG_FILE} 2>&1\"
-}"
-        echo -e "${SERVICE_CONTENT}" > $SERVICE_FILE
-        chmod +x $SERVICE_FILE
-        rc-update add ${SERVICE_NAME} default
-    fi
-    
-    start_service
-
-    # 6. 显示结果
-    green "✅ MTProxy 已通过守护进程成功安装并启动！"
-    show_status
-}
-
-uninstall_mtproxy() {
-    red "警告: 此操作将彻底删除 MTProxy 服务、所有相关文件。"
-    read -p "确定要继续吗? (y/n): " confirm
-    if [[ $confirm != "y" ]]; then
-        green "操作已取消。"
-        return
-    fi
-    
-    stop_service
-    
-    yellow "正在卸载守护进程..."
-    if [ "$INIT_SYSTEM" == "systemd" ]; then
-        SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
-        if [ -f "$SERVICE_FILE" ]; then
-            systemctl disable ${SERVICE_NAME} > /dev/null 2>&1
-            rm -f "$SERVICE_FILE"
-            systemctl daemon-reload
-            green "Systemd 服务已卸载。"
+    # 如果两个实例都卸载了，询问是否删除主程序和脚本
+    if ! [ -f "${CONFIG_DIR}/config_secured" ] && ! [ -f "${CONFIG_DIR}/config_faketls" ]; then
+        echo
+        read -p "所有实例均已卸载。是否删除主程序和此脚本？ (y/N): " cleanup_confirm
+        if [ "$cleanup_confirm" = "y" ] || [ "$cleanup_confirm" = "Y" ]; then
+            rm -f "$BIN_PATH"
+            rm -rf "$CONFIG_DIR"
+            echo "主程序和配置文件目录已删除。"
+            echo "脚本将在1秒后自我删除..."
+            ( sleep 1 && rm -- "$0" ) & exit 0
         fi
-    elif [ "$INIT_SYSTEM" == "openrc" ]; then
-        SERVICE_FILE="/etc/init.d/${SERVICE_NAME}"
-        if [ -f "$SERVICE_FILE" ]; then
-            rc-update del ${SERVICE_NAME} default > /dev/null 2>&1
-            rm -f "$SERVICE_FILE"
-            green "OpenRC 服务已卸载。"
-        fi
-    fi
-
-    if [ -d "$WORKDIR" ]; then
-        rm -rf "$WORKDIR"
-        green "安装目录已删除。"
-    fi
-    
-    green "✅ MTProxy 已被彻底卸载！"
-
-    read -p "是否要删除当前脚本文件 (${SCRIPT_PATH})? (y/n): " self_delete
-    if [[ $self_delete == "y" ]]; then
-        green "正在删除脚本文件..."
-        rm -f "${SCRIPT_PATH}"
     fi
 }
 
-show_status() {
-    if ! [ -d "$WORKDIR" ] || ! [ -f "$CONFIG_FILE" ]; then
-        clear
-        red "MTProxy 未安装。"
-        return
-    fi
+show_info() {
+    service_type="$1"
+    config_file="${CONFIG_DIR}/config_${service_type}"
+
+    if ! [ -f "$config_file" ]; then echo "错误: [$service_type] 未配置。"; return; fi
+
+    . "$config_file"; MTP_PORT=${PORT}; MTP_SECRET=${SECRET}
     
-    clear
-    if ! is_service_running; then
-        red "MTProxy 服务当前未运行。"
-        return
-    fi
-    
-    source $CONFIG_FILE
-    PUBLIC_IP=$(dig +short myip.opendns.com @resolver1.opendns.com || curl -s https://ipv4.icanhazip.com)
-    
-    green "✅ MTProxy 服务正在运行中。"
-    echo "=================================================="
-    yellow "服务器IP:    ${PUBLIC_IP}"
-    yellow "端口:        ${PORT}"
-    yellow "密钥 (Secret): ${TLS_SECRET}"
-    echo "--------------------------------------------------"
-    green "TG 一键链接 (点击即可自动配置):"
-    green "https://t.me/proxy?server=${PUBLIC_IP}&port=${PORT}&secret=${TLS_SECRET}"
-    echo "=================================================="
-    if is_service_running; then
-        green "守护进程状态: active (运行中) - by $INIT_SYSTEM"
+    IPV4=$(curl -s4 --connect-timeout 2 ip.sb || echo "无法获取")
+    echo
+    echo "======= [${service_type}] MTProxy 链接 ======="
+    if [ -n "$IPV4" ] && [ -n "$MTP_PORT" ] && [ -n "$MTP_SECRET" ]; then
+        echo "服务器地址: ${IPV4}"
+        echo "端口:       ${MTP_PORT}"
+        echo "密钥:       ${MTP_SECRET}"
+        echo
+        echo "tg://proxy?server=${IPV4}&port=${MTP_PORT}&secret=${MTP_SECRET}"
+        echo "https://t.me/proxy?server=${IPV4}&port=${MTP_PORT}&secret=${MTP_SECRET}"
     else
-        red "守护进程状态: inactive (已停止)"
+         echo "无法获取配置信息。"
     fi
 }
 
-# --- 主菜单 ---
-show_menu(){
-    clear
-    echo "=================================================="
-    echo "     MTProxy 一键安装脚本 (自动适配版) "
-    echo "=================================================="
-    green "1. 安装 MTProxy (自动配置守护进程)"
-    green "2. 卸载 MTProxy"
-    green "3. 重启 MTProxy"
-    green "4. 查看连接信息与状态"
-    yellow "0. 退出脚本"
-    echo "=================================================="
-    read -p "请输入您的选择 [0-4]: " num
+# 5. 菜单系统
+# =================================
 
-    case "$num" in
-        1) install_mtproxy ;;
-        2) uninstall_mtproxy ;;
-        3) restart_service ;;
-        4) show_status ;;
-        0) exit 0 ;;
-        *) red "输入错误，请输入有效数字 [0-4]" ;;
+manage_service() {
+    service_type="$1"
+    while true; do
+        is_installed="未安装"; if [ -f "${CONFIG_DIR}/config_${service_type}" ]; then is_installed="已安装"; fi
+        running_status="未运行"; if is_running "$service_type"; then running_status="运行中"; fi
+        
+        echo
+        echo "=========== 管理 [${service_type}] 实例 ==========="
+        echo "   状态: ${is_installed} | 运行: ${running_status}"
+        echo "-------------------------------------------------"
+        echo "   1) 安装 / 修改配置"
+        echo "   2) 启动"
+        echo "   3) 停止"
+        echo "   4) 重启"
+        echo "   5) 查看链接信息"
+        echo "   6) 卸载此实例"
+        echo "-------------------------------------------------"
+        echo "   0) 返回主菜单"
+        echo
+        read -p "请输入选项: " opt
+        case "$opt" in
+            1) install_mtg "$service_type" ;;
+            2) start_service "$service_type" ;;
+            3) stop_service "$service_type" ;;
+            4) restart_service "$service_type" ;;
+            5) show_info "$service_type" ;;
+            6) uninstall_mtg "$service_type" ;;
+            0) return ;;
+            *) echo "无效选项，请重新输入。" ;;
+        esac
+    done
+}
+
+show_main_menu() {
+    secured_status="未运行"; if is_running secured; then secured_status="运行中"; fi
+    faketls_status="未运行"; if is_running faketls; then faketls_status="运行中"; fi
+    
+    echo
+    echo "=========== MTProxy 多实例管理脚本 (管理器: ${INIT_SYSTEM}) ==========="
+    echo "1) 管理 [secured] 实例 (状态: ${secured_status})"
+    echo "2) 管理 [faketls] 实例 (状态: ${faketls_status})"
+    echo "-------------------------------------------------"
+    echo "0) 退出脚本"
+    echo
+    read -p "请输入选项: " opt
+    case "$opt" in
+        1) manage_service "secured" ;;
+        2) manage_service "faketls" ;;
+        0|q|Q) exit 0 ;;
+        *) echo "无效选项，请重新输入。" ;;
     esac
 }
 
-# --- 脚本入口 ---
+# 6. 主流程
+# =================================
+main() {
+    check_init_system
+    check_deps
+    
+    while true; do
+        show_main_menu
+    done
+}
 
-# 首先检测系统
-detect_init_system
-
-# 根据命令行参数或显示菜单
-if [[ $# -gt 0 ]]; then
-    case "$1" in
-        install) install_mtproxy ;;
-        uninstall) uninstall_mtproxy ;;
-        restart) restart_service ;;
-        status) show_status ;;
-        *) red "无效参数: $1，可用参数: install, uninstall, restart, status"; exit 1 ;;
-    esac
-else
-    show_menu
-fi
+main
