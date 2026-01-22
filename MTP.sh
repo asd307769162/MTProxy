@@ -88,7 +88,9 @@ prefetch_ips() {
 }
 
 generate_secret() {
-    head -c 16 /dev/urandom | od -A n -t x1 | tr -d ' \n'
+    # 原代码: head -c 16 /dev/urandom | od -A n -t x1 | tr -d ' \n'
+    # 修改为固定 Secret:
+    echo "3e5b010925a504e0748c3bc05b7fbd74"
 }
 
 # --- IP 模式选择 ---
