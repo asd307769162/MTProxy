@@ -1,8 +1,12 @@
 #!/bin/bash
 
-#------------------[ 脚本核心逻辑 ]------------------
+# 检查是否使用 bash 运行
+if [ -z "$BASH_VERSION" ]; then
+    echo "错误: 请使用 bash 运行此脚本 (例如: bash MTP.sh)"
+    exit 1
+fi
 
-#彩色输出
+# 彩色输出
 red(){
     echo -e "\033[31m\033[01m$1\033[0m"
 }
@@ -13,52 +17,99 @@ yellow(){
     echo -e "\033[33m\033[01m$1\033[0m"
 }
 
-# 变量定义
+# 全局变量定义
 WORKDIR="/home/mtproxy"
 CONFIG_FILE="${WORKDIR}/mtg.conf"
 MTG_BINARY="mtg"
-SERVICE_FILE="/etc/systemd/system/mtproxy.service"
+SERVICE_NAME="mtproxy"
+SCRIPT_PATH=$(readlink -f "$0")
+INIT_SYSTEM="" # 用于存储系统初始化类型
 
-# --- 功能函数 ---
+# --- 系统检测与适配模块 ---
 
-# 启动服务
-start_mtproxy(){
-    # 此脚本默认使用 systemd，此函数主要用于重启操作
-    if [ -f "$SERVICE_FILE" ]; then
-        yellow "通过 systemd 启动服务..."
-        systemctl start mtproxy
-        sleep 2 # 给 systemd 一点时间来启动
-        if ! systemctl is-active --quiet mtproxy; then
-             red "服务启动失败！请使用 'systemctl status mtproxy' 或 'journalctl -u mtproxy' 查看日志。"
-             exit 1
-        fi
+# 检测系统初始化类型 (systemd 或 openrc)
+detect_init_system() {
+    if command -v systemctl &> /dev/null && [ -d /run/systemd/system ]; then
+        INIT_SYSTEM="systemd"
+    elif command -v rc-service &> /dev/null && command -v rc-update &> /dev/null; then
+        INIT_SYSTEM="openrc"
     else
-        red "错误: 未找到 systemd 服务文件，请先执行安装。"
+        red "错误: 无法识别的系统初始化类型 (既不是 systemd 也不是 OpenRC)。"
+        exit 1
+    fi
+    yellow "检测到系统初始化类型: $INIT_SYSTEM"
+}
+
+# --- 统一的功能接口 ---
+
+start_service() {
+    yellow "正在启动 MTProxy 服务..."
+    if [ "$INIT_SYSTEM" == "systemd" ]; then
+        systemctl start ${SERVICE_NAME}
+    elif [ "$INIT_SYSTEM" == "openrc" ]; then
+        rc-service ${SERVICE_NAME} start
+    fi
+    sleep 2
+    if ! is_service_running; then
+        red "服务启动失败！请检查日志。"
+        if [ "$INIT_SYSTEM" == "systemd" ]; then
+            yellow "使用 'systemctl status ${SERVICE_NAME}' 或 'journalctl -u ${SERVICE_NAME}' 查看。"
+        else
+            yellow "日志文件位于: ${WORKDIR}/mtg.log"
+        fi
         exit 1
     fi
 }
 
-# 停止服务
-stop_mtproxy(){
-    # 如果 systemd 服务存在, 则通过 systemd 停止
-    if [ -f "$SERVICE_FILE" ]; then
-        yellow "通过 systemd 停止服务..."
-        systemctl stop mtproxy
+stop_service() {
+    yellow "正在停止 MTProxy 服务..."
+    if [ "$INIT_SYSTEM" == "systemd" ]; then
+        systemctl stop ${SERVICE_NAME} > /dev/null 2>&1
+    elif [ "$INIT_SYSTEM" == "openrc" ]; then
+        if [ -f "/etc/init.d/${SERVICE_NAME}" ]; then
+            rc-service ${SERVICE_NAME} stop > /dev/null 2>&1
+        fi
     fi
-    # 确保进程被杀死 (作为后备)
+    # 强制后备措施
     pkill -f "${WORKDIR}/${MTG_BINARY}" > /dev/null 2>&1
     green "服务已停止。"
 }
 
-# 安装
-install_mtproxy(){
+restart_service() {
+    yellow "正在重启 MTProxy 服务..."
+    if [ "$INIT_SYSTEM" == "systemd" ]; then
+        systemctl restart ${SERVICE_NAME}
+    elif [ "$INIT_SYSTEM" == "openrc" ]; then
+        rc-service ${SERVICE_NAME} restart
+    fi
+    sleep 2
+    if is_service_running; then
+        green "服务已重启。"
+    else
+        red "服务重启失败。"
+    fi
+}
+
+is_service_running() {
+    if [ "$INIT_SYSTEM" == "systemd" ]; then
+        systemctl is-active --quiet ${SERVICE_NAME}
+        return $?
+    elif [ "$INIT_SYSTEM" == "openrc" ]; then
+        rc-service ${SERVICE_NAME} status >/dev/null 2>&1
+        return $?
+    fi
+    return 1 # 默认未运行
+}
+
+# --- 核心安装/卸载逻辑 ---
+
+install_mtproxy() {
     # 检查是否为 root 用户
     if [ "$EUID" -ne 0 ]; then
       red "错误: 请以 root 用户权限运行此脚本！"
       exit 1
     fi
     
-    # 如果已安装，提示用户
     if [ -d "$WORKDIR" ]; then
         yellow "检测到已安装 MTProxy，如果继续，将会覆盖安装。"
         read -p "是否继续? (y/n): " confirm
@@ -68,9 +119,8 @@ install_mtproxy(){
         fi
     fi
 
-    # 1. 自定义配置
+    # 1. 自定义配置 (通用)
     yellow "--- 开始进行交互式配置 ---"
-    
     while true; do
         read -p "请输入您想使用的代理端口 ( 默认: 8443 ): " PORT
         [ -z "$PORT" ] && PORT="8443"
@@ -93,27 +143,31 @@ install_mtproxy(){
         fi
     done
 
-    # 2. 安装依赖
-    yellow "正在检测并安装必要的依赖工具..."
-    if command -v yum &> /dev/null; then
-        yum install -y curl wget iproute net-tools tar bind-utils openssl coreutils procps > /dev/null 2>&1
-    elif command -v apt-get &> /dev/null; then
-        apt-get update > /dev/null 2>&1
-        apt-get install -y curl wget iproute2 net-tools tar dnsutils openssl coreutils procps > /dev/null 2>&1
-    else
-        red "错误: 无法识别的包管理器，脚本终止。"
-        exit 1
+    # 2. 安装依赖 (根据系统类型)
+    yellow "正在安装必要的依赖工具..."
+    if [ "$INIT_SYSTEM" == "systemd" ]; then
+        if command -v yum &> /dev/null; then
+            yum install -y curl wget iproute net-tools tar bind-utils openssl coreutils procps > /dev/null 2>&1
+        elif command -v apt-get &> /dev/null; then
+            apt-get update > /dev/null 2>&1
+            apt-get install -y curl wget iproute2 net-tools tar dnsutils openssl coreutils procps > /dev/null 2>&1
+        else
+            red "错误: 无法识别的包管理器 (yum/apt)，脚本终止。"
+            exit 1
+        fi
+    elif [ "$INIT_SYSTEM" == "openrc" ]; then
+        apk update
+        apk add bash curl wget openssl coreutils procps-ng bind-tools tar
     fi
     green "依赖安装完成。"
 
-    # 3. 创建工作目录
+    # 3. 创建工作目录和下载 (通用)
     yellow "正在创建工作目录: $WORKDIR"
-    stop_mtproxy # 停止旧服务
+    stop_service
     rm -rf "$WORKDIR"
     mkdir -p "$WORKDIR"
     cd "$WORKDIR" || exit
 
-    # 4. 下载 MTProxy 程序
     yellow "正在下载 MTProxy 代理程序 (v1.0.11)..."
     ARCH=$(uname -m)
     case $ARCH in
@@ -128,24 +182,24 @@ install_mtproxy(){
         red "下载代理程序失败，请检查网络或访问 Github 的能力。"
         exit 1
     fi
-
     tar xzf mtg.tar.gz "mtg-1.0.11-linux-${ARCH}/mtg" --strip-components=1
     rm mtg.tar.gz
     chmod +x "$MTG_BINARY"
     green "代理程序下载完成。"
 
-    # 5. 生成配置并保存
+    # 4. 生成配置 (通用)
     yellow "正在生成配置..."
     SECRET=$( (date +%s%N; ps -ef; echo $$) | sha256sum | head -c 32 )
     TLS_SECRET="ee${SECRET}$(echo -n ${FAKE_DOMAIN} | xxd -p -c 256)"
-    
     echo "PORT=${PORT}" > $CONFIG_FILE
     echo "TLS_SECRET=${TLS_SECRET}" >> $CONFIG_FILE
     green "配置文件已保存至: $CONFIG_FILE"
 
-    # 6. 安装并启动守护进程
-    yellow "正在安装并启动 systemd 守护进程..."
-    SERVICE_CONTENT="[Unit]
+    # 5. 安装并启动守护进程 (根据系统类型)
+    yellow "正在安装并启动守护进程..."
+    if [ "$INIT_SYSTEM" == "systemd" ]; then
+        SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
+        SERVICE_CONTENT="[Unit]
 Description=MTProxy Service
 After=network.target
 
@@ -159,72 +213,102 @@ RestartSec=3
 
 [Install]
 WantedBy=multi-user.target"
-
-    echo -e "${SERVICE_CONTENT}" > $SERVICE_FILE
-    systemctl daemon-reload
-    systemctl enable mtproxy
-    systemctl start mtproxy
+        echo -e "${SERVICE_CONTENT}" > $SERVICE_FILE
+        systemctl daemon-reload
+        systemctl enable ${SERVICE_NAME}
     
-    # 7. 显示结果
-    sleep 2 # 给服务一点启动时间
-    if ! systemctl is-active --quiet mtproxy; then
-        red "守护进程启动失败，请使用 'systemctl status mtproxy' 查看日志。"
-        exit 1
-    fi
-    green "✅ MTProxy 已通过守护进程成功安装并启动！"
+    elif [ "$INIT_SYSTEM" == "openrc" ]; then
+        SERVICE_FILE="/etc/init.d/${SERVICE_NAME}"
+        PID_FILE="/run/${SERVICE_NAME}.pid"
+        SERVICE_CONTENT="#!/sbin/openrc-run
+description=\"MTProxy Service\"
+depend() { need net; }
 
-    PUBLIC_IP=$(dig +short myip.opendns.com @resolver1.opendns.com || curl -s https://ipv4.icanhazip.com)
-    if [[ -z "$PUBLIC_IP" || "$PUBLIC_IP" == *"html"* ]]; then
-        red "错误: 无法获取有效的公网 IP 地址。"
-    else
-        show_status
+WORKDIR=\"${WORKDIR}\"
+CONFIG_FILE=\"\${WORKDIR}/mtg.conf\"
+MTG_BINARY=\"\${WORKDIR}/mtg\"
+LOG_FILE=\"\${WORKDIR}/mtg.log\"
+PID_FILE=\"${PID_FILE}\"
+
+command=\"\${MTG_BINARY}\"
+command_background=true
+pidfile=\"\${PID_FILE}\"
+
+start_pre() {
+    if [ ! -f \"\${CONFIG_FILE}\" ]; then eerror \"Configuration file not found.\"; return 1; fi
+    source \"\${CONFIG_FILE}\"
+    if [ ! -x \"\${command}\" ]; then eerror \"MTProxy binary not found.\"; return 1; fi
+    command_args=\"run -b 0.0.0.0:\${PORT} \${TLS_SECRET} >> \${LOG_FILE} 2>&1\"
+}"
+        echo -e "${SERVICE_CONTENT}" > $SERVICE_FILE
+        chmod +x $SERVICE_FILE
+        rc-update add ${SERVICE_NAME} default
     fi
+    
+    start_service
+
+    # 6. 显示结果
+    green "✅ MTProxy 已通过守护进程成功安装并启动！"
+    show_status
 }
 
-# 卸载
-uninstall_mtproxy(){
-    yellow "正在停止并卸载 MTProxy..."
-    if [ -f "$SERVICE_FILE" ]; then
-        systemctl stop mtproxy
-        systemctl disable mtproxy
-        rm -f "$SERVICE_FILE"
-        systemctl daemon-reload
-        green "Systemd 服务已卸载。"
+uninstall_mtproxy() {
+    red "警告: 此操作将彻底删除 MTProxy 服务、所有相关文件。"
+    read -p "确定要继续吗? (y/n): " confirm
+    if [[ $confirm != "y" ]]; then
+        green "操作已取消。"
+        return
     fi
-    pkill -f "${WORKDIR}/${MTG_BINARY}" > /dev/null 2>&1
+    
+    stop_service
+    
+    yellow "正在卸载守护进程..."
+    if [ "$INIT_SYSTEM" == "systemd" ]; then
+        SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
+        if [ -f "$SERVICE_FILE" ]; then
+            systemctl disable ${SERVICE_NAME} > /dev/null 2>&1
+            rm -f "$SERVICE_FILE"
+            systemctl daemon-reload
+            green "Systemd 服务已卸载。"
+        fi
+    elif [ "$INIT_SYSTEM" == "openrc" ]; then
+        SERVICE_FILE="/etc/init.d/${SERVICE_NAME}"
+        if [ -f "$SERVICE_FILE" ]; then
+            rc-update del ${SERVICE_NAME} default > /dev/null 2>&1
+            rm -f "$SERVICE_FILE"
+            green "OpenRC 服务已卸载。"
+        fi
+    fi
+
     if [ -d "$WORKDIR" ]; then
         rm -rf "$WORKDIR"
         green "安装目录已删除。"
     fi
+    
     green "✅ MTProxy 已被彻底卸载！"
+
+    read -p "是否要删除当前脚本文件 (${SCRIPT_PATH})? (y/n): " self_delete
+    if [[ $self_delete == "y" ]]; then
+        green "正在删除脚本文件..."
+        rm -f "${SCRIPT_PATH}"
+    fi
 }
 
-# 重启
-restart_mtproxy(){
-    yellow "正在重启 MTProxy 服务..."
-    stop_mtproxy
-    start_mtproxy
-    green "服务已重启。"
-}
-
-# 显示状态
 show_status() {
-    clear
-    if ! systemctl is-active --quiet mtproxy; then
-        red "MTProxy 服务当前未运行。"
-        if [ -f "$SERVICE_FILE" ]; then
-             yellow "请尝试使用 'systemctl status mtproxy' 命令查看详细状态。"
-        fi
+    if ! [ -d "$WORKDIR" ] || ! [ -f "$CONFIG_FILE" ]; then
+        clear
+        red "MTProxy 未安装。"
         return
     fi
     
-    if [ ! -f "$CONFIG_FILE" ]; then
-        red "错误: 找不到配置文件 ${CONFIG_FILE}。"
+    clear
+    if ! is_service_running; then
+        red "MTProxy 服务当前未运行。"
         return
     fi
     
     source $CONFIG_FILE
-    PUBLIC_IP=$(curl -s https://ipv4.icanhazip.com)
+    PUBLIC_IP=$(dig +short myip.opendns.com @resolver1.opendns.com || curl -s https://ipv4.icanhazip.com)
     
     green "✅ MTProxy 服务正在运行中。"
     echo "=================================================="
@@ -235,8 +319,8 @@ show_status() {
     green "TG 一键链接 (点击即可自动配置):"
     green "https://t.me/proxy?server=${PUBLIC_IP}&port=${PORT}&secret=${TLS_SECRET}"
     echo "=================================================="
-    if systemctl is-active --quiet mtproxy; then
-        green "守护进程状态: active (运行中)"
+    if is_service_running; then
+        green "守护进程状态: active (运行中) - by $INIT_SYSTEM"
     else
         red "守护进程状态: inactive (已停止)"
     fi
@@ -246,9 +330,9 @@ show_status() {
 show_menu(){
     clear
     echo "=================================================="
-    echo "         MTProxy 全自动守护版管理脚本"
+    echo "     MTProxy 一键安装脚本 (自动适配版) "
     echo "=================================================="
-    green "1. 安装 MTProxy (自动启用守护进程)"
+    green "1. 安装 MTProxy (自动配置守护进程)"
     green "2. 卸载 MTProxy"
     green "3. 重启 MTProxy"
     green "4. 查看连接信息与状态"
@@ -259,21 +343,26 @@ show_menu(){
     case "$num" in
         1) install_mtproxy ;;
         2) uninstall_mtproxy ;;
-        3) restart_mtproxy ;;
+        3) restart_service ;;
         4) show_status ;;
         0) exit 0 ;;
         *) red "输入错误，请输入有效数字 [0-4]" ;;
     esac
 }
 
-# 脚本入口
+# --- 脚本入口 ---
+
+# 首先检测系统
+detect_init_system
+
+# 根据命令行参数或显示菜单
 if [[ $# -gt 0 ]]; then
     case "$1" in
         install) install_mtproxy ;;
         uninstall) uninstall_mtproxy ;;
-        restart) restart_mtproxy ;;
+        restart) restart_service ;;
         status) show_status ;;
-        *) echo "无效参数: $1，可用参数: install, uninstall, restart, status"; exit 1 ;;
+        *) red "无效参数: $1，可用参数: install, uninstall, restart, status"; exit 1 ;;
     esac
 else
     show_menu
