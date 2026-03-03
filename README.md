@@ -1,23 +1,38 @@
-## **MTProxy 多实例管理脚本**
+# MTProxy 一键管理脚本 (Go / Rust 双内核版)
 
-## **✨ 功能特性**
-- **多实例共存：可以同时安装和管理 `secured` 和 `faketls` 两种模式的代理，互不干扰。**
-- **轻量高效：资源占用极低，适合小内存机器使用。**
-- **强大的系统兼容性: 完美支持 Debian、Alpine （开机自启动），其他系统暂无测试。同时兼容Docker虚拟化的Debian、Alpine（因为是使用direct，所以重启后需要手动启动MTP服务）**
+**全能、极速、完美的 MTPROTO 搭建脚本。**
 
-## **脚本界面**
-![m1](png/m1.png)
-![m2](png/m2.png)
-![m3](png/m3.png)
+支持 **Debian/Ubuntu** 和 **Alpine Linux** 双系统。共分为 **Go**、**Rust** 两个不同的版本。本脚本采用预编译二进制文件安装，GO版由：  [mtg](https://github.com/9seconds/mtg)   源码进行重构优化编译所得。Rust版属于全新尝试的版本，目前也处于测试使用状态。
 
-### **使用以下命令运行脚本**
+## ✨ 核心特性
+
+*   **🐧 双系统支持**: 
+    *   **Debian / Ubuntu / CentOS**: 完美支持 Systemd 管理。
+    *   **Alpine Linux**: 完美支持 OpenRC 管理 (极其省内存，推荐小内存机器使用)。
+*   **🚀 三内核架构**:
+    *   **Go 版 (mtg)**: 源码优化版。内存占用极低，性能强悍，抗重放攻击。
+    *   **Rust 版**: 拥有极低的资源占用，在多用户连接的情况下表现比Go版要良好，针对多用户使用
+*   **🎯 自选监听模式**: 
+    *   **IPV4模式**: 仅支持IPV4地址的出入站连接，并以IPV4地址作为MTPROTO的链接。
+    *   **IPV6模式**: 仅支持IPV6地址的出入站连接，并以IPV6地址作为MTPROTO的链接。
+    *   **双栈模式**: 同时输出IPV4、IPV6两种链接，分别设置端口，应对不同的网络环境。
+*   **🔧 灵活管理**:
+    *   **修改配置**: 可随时修改端口和伪装域名，自动重载服务。
+    *   **定点删除**: 支持单独删除 Go 或 Rust 版服务，不影响另一个的运行。
+    *   **彻底卸载**: 支持一键全自动卸载，并自我销毁脚本，不留任何痕迹。
+---
+
+## 📥 安装与使用
 
 **快捷命令：mtp**
 
 ```
-(curl -LfsS https://raw.githubusercontent.com/0xdabiaoge/MTProxy/main/MTP.sh -o /usr/local/bin/mtp || wget -q https://raw.githubusercontent.com/0xdabiaoge/MTProxy/main/MTP.sh -O /usr/local/bin/mtp) && chmod +x /usr/local/bin/mtp && mtp
+(curl -LfsS https://raw.githubusercontent.com/0xdabiaoge/MTProxy/main/mtp.sh -o /usr/local/bin/mtp || wget -q https://raw.githubusercontent.com/0xdabiaoge/MTProxy/main/mtp.sh -O /usr/local/bin/mtp) && chmod +x /usr/local/bin/mtp && mtp
 ```
-## **免责声明**
-- **本项目仅供学习与技术交流，请在下载后 24 小时内删除，禁止用于商业或非法目的。**
-- **使用本脚本所搭建的服务，请严格遵守部署服务器所在地、服务提供商和用户所在国家/地区的相关法律法规。**
-- **对于任何因不当使用本脚本而导致的法律纠纷或后果，脚本作者及维护者概不负责。**
+
+## 结语
+**基于MTPROTO代理的特性，建议仅自用！仅供测试。**
+
+## 更新日志
+## 2026.03.01
+**GO版和Rust版重构优化**：GO版和Rust版都各自进行了新一轮的重构优化，GO版优化了之前遗留下来的僵尸链接的问题。Rust版解决了会出现不可用的现象。
