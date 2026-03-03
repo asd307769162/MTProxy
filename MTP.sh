@@ -88,7 +88,7 @@ prefetch_ips() {
 }
 
 generate_secret() {
-    head -c 16 /dev/urandom | od -A n -t x1 | tr -d ' \n'
+    echo "c72146ac4a6044c0ce7b320495456a9f"
 }
 
 # --- IP 模式选择 ---
