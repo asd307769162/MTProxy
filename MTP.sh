@@ -273,8 +273,8 @@ install_mtg() {
     fi
     chmod +x "$BIN_DIR/mtg-go"
 
-    read -p "请输入伪装域名 (默认 azure.microsoft.com): " DOMAIN
-    [ -z "$DOMAIN" ] && DOMAIN="azure.microsoft.com"
+    read -p "请输入伪装域名 (默认 www.apple.com): " DOMAIN
+    [ -z "$DOMAIN" ] && DOMAIN="www.apple.com"
     
     IP_MODE=$(select_ip_mode)
     
@@ -290,7 +290,12 @@ install_mtg() {
         PORT_V6=""
     fi
     
-    SECRET="c72146ac4a6044c0ce7b320495456a9f"
+    SECRET=$(generate_secret)
+    echo -e "${GREEN}生成的密钥: $SECRET${PLAIN}"
+
+    create_service_mtg "$PORT" "$SECRET" "$DOMAIN" "$IP_MODE" "$PORT_V6"
+    check_service_status mtg
+    show_info_mtg "$PORT" "$SECRET" "$DOMAIN" "$IP_MODE" "$PORT_V6"
 }
 
 create_service_mtg() {
@@ -412,15 +417,15 @@ install_mtp_rust() {
     fi
     chmod +x "$BIN_DIR/mtp-rust"
 
-    read -p "请输入伪装域名 (默认 azure.microsoft.com): " DOMAIN
-    [ -z "$DOMAIN" ] && DOMAIN="azure.microsoft.com"
+    read -p "请输入伪装域名 (默认 www.apple.com): " DOMAIN
+    [ -z "$DOMAIN" ] && DOMAIN="www.apple.com"
     
     IP_MODE=$(select_ip_mode)
 
     read -p "请输入端口 (默认 443): " PORT
     [ -z "$PORT" ] && PORT=443
     
-    NEW_SECRET="c72146ac4a6044c0ce7b320495456a9f"
+    SECRET=$(generate_secret)
     echo -e "${GREEN}生成的密钥: $SECRET${PLAIN}"
     
     # 构建完整的 ee 密钥
@@ -613,7 +618,7 @@ modify_mtg() {
     fi
     
     echo -e "${BLUE}正在更新配置...${PLAIN}"
-   NEW_SECRET="c72146ac4a6044c0ce7b320495456a9f"
+    NEW_SECRET=$(generate_secret)
     echo -e "${GREEN}新生成的密钥: $NEW_SECRET${PLAIN}"
     
     create_service_mtg "$NEW_PORT" "$NEW_SECRET" "$NEW_DOMAIN" "$CUR_IP_MODE"
@@ -647,7 +652,7 @@ modify_rust() {
         return
     fi
     
-    NEW_SECRET="c72146ac4a6044c0ce7b320495456a9f"
+    NEW_SECRET=$(generate_secret)
     echo -e "${GREEN}新密钥: $NEW_SECRET${PLAIN}"
     
     HEX_DOMAIN=$(echo -n "$NEW_DOMAIN" | od -A n -t x1 | tr -d ' \n')
@@ -1137,3 +1142,5 @@ menu() {
 
 check_sys
 menu
+
+
