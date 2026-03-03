@@ -27,7 +27,7 @@
 **快捷命令：mtp**
 
 ```
-(curl -LfsS https://raw.githubusercontent.com/asd307769162/MTProxy/main/mtp.sh -o /usr/local/bin/mtp || wget -q https://raw.githubusercontent.com/asd307769162/MTProxy/main/mtp.sh -O /usr/local/bin/mtp) && chmod +x /usr/local/bin/mtp && mtp
+(curl -LfsS https://raw.githubusercontent.com/asd307769162/MTProxy/refs/heads/2/MTP.sh || wget -q https://raw.githubusercontent.com/asd307769162/MTProxy/refs/heads/2/MTP.sh -O /usr/local/bin/mtp) && chmod +x /usr/local/bin/mtp && mtp
 ```
 
 ## 结语
