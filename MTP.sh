@@ -88,7 +88,7 @@ prefetch_ips() {
 }
 
 generate_secret() {
-    echo "a2fe4514525845094be69824ef803e80"
+    echo "3e5b010925a504e0748c3bc05b7fbd74"
 }
 
 # --- IP 模式选择 ---
@@ -290,7 +290,7 @@ install_mtg() {
         PORT_V6=""
     fi
     
-    SECRET="a2fe4514525845094be69824ef803e80"
+    SECRET="3e5b010925a504e0748c3bc05b7fbd74"
     echo -e "${GREEN}生成的密钥: $SECRET${PLAIN}"
 
     create_service_mtg "$PORT" "$SECRET" "$DOMAIN" "$IP_MODE" "$PORT_V6"
@@ -425,7 +425,7 @@ install_mtp_rust() {
     read -p "请输入端口 (默认 443): " PORT
     [ -z "$PORT" ] && PORT=443
     
-    SECRET="a2fe4514525845094be69824ef803e80"
+    SECRET="3e5b010925a504e0748c3bc05b7fbd74"
     echo -e "${GREEN}生成的密钥: $SECRET${PLAIN}"
     
     # 构建完整的 ee 密钥
@@ -618,7 +618,7 @@ modify_mtg() {
     fi
     
     echo -e "${BLUE}正在更新配置...${PLAIN}"
-    NEW_SECRET="a2fe4514525845094be69824ef803e80"
+    NEW_SECRET="3e5b010925a504e0748c3bc05b7fbd74"
     echo -e "${GREEN}新生成的密钥: $NEW_SECRET${PLAIN}"
     
     create_service_mtg "$NEW_PORT" "$NEW_SECRET" "$NEW_DOMAIN" "$CUR_IP_MODE"
@@ -652,7 +652,7 @@ modify_rust() {
         return
     fi
     
-    NEW_SECRET="a2fe4514525845094be69824ef803e80"
+    NEW_SECRET="3e5b010925a504e0748c3bc05b7fbd74"
     echo -e "${GREEN}新密钥: $NEW_SECRET${PLAIN}"
     
     HEX_DOMAIN=$(echo -n "$NEW_DOMAIN" | od -A n -t x1 | tr -d ' \n')
