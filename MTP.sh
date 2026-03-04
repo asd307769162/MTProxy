@@ -405,7 +405,7 @@ install_mtp_rust() {
         cp "${FOUND_PATH}" "$BIN_DIR/mtp-rust"
     else
         echo -e "${BLUE}未找到本地文件，尝试从 GitHub 下载 (${TARGET_BIN})...${PLAIN}"
-        DOWNLOAD_URL="https://github.com/0xdabiaoge/MTProxy/releases/download/Go-Rust/${TARGET_BIN}"
+        DOWNLOAD_URL="https://github.com/asd307769162/MTProxy/releases/download/1/${TARGET_BIN}"
         wget -O "$BIN_DIR/mtp-rust" "$DOWNLOAD_URL"
         if [ $? -ne 0 ]; then
             echo -e "${RED}下载失败！${PLAIN}"
