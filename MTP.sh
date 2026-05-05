@@ -273,8 +273,8 @@ install_mtg() {
     fi
     chmod +x "$BIN_DIR/mtg-go"
 
-    read -p "请输入伪装域名 (默认 azure.microsoft.com): " DOMAIN
-    [ -z "$DOMAIN" ] && DOMAIN="azure.microsoft.com"
+    read -p "请输入伪装域名 (默认 www.apple.com): " DOMAIN
+    [ -z "$DOMAIN" ] && DOMAIN="www.apple.com"
     
     IP_MODE=$(select_ip_mode)
     
@@ -417,8 +417,8 @@ install_mtp_rust() {
     fi
     chmod +x "$BIN_DIR/mtp-rust"
 
-    read -p "请输入伪装域名 (默认 azure.microsoft.com): " DOMAIN
-    [ -z "$DOMAIN" ] && DOMAIN="azure.microsoft.com"
+    read -p "请输入伪装域名 (默认 www.apple.com): " DOMAIN
+    [ -z "$DOMAIN" ] && DOMAIN="www.apple.com"
     
     IP_MODE=$(select_ip_mode)
 
