@@ -97,7 +97,7 @@ get_mtg_config() {
         
         
     else
-        SECRET="dd8a8381b0c51153f9c7dac4529c0d519e"
+        SECRET=$("$BIN_PATH" generate-secret "secured")
     fi
 
     while true; do
